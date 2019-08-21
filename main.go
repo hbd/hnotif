@@ -136,6 +136,7 @@ func checkStories(scoreThreshold int, topStories []int) error {
 }
 
 func setupLogger() {
+	// TODO: Use config to configure logger.
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 	logrus.SetOutput(os.Stderr)
 	logrus.SetLevel(logrus.InfoLevel)
