@@ -14,6 +14,8 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// TODO: Think about extracting these into a go pkg for HN.
+
 const (
 	hnBaseURL       = "https://hacker-news.firebaseio.com/v0"
 	hnTopStories    = "/topstories.json"
@@ -70,18 +72,16 @@ func getItem(itemID int) (apimodel.GetItemResponse, error) {
 	return item, nil
 }
 
-func checkStories(scoreThreshold int, topStories []int) error {
-	avgScore := 0
-	topScore := 0
-	botScore := 500
+func checkStories(scoreThreshold int, maxAge time.Duration, topStories []int) ([]apimodel.GetItemResponse, error) {
+	notifItems := []apimodel.GetItemResponse{}
 	numStoriesOverThreshold := 0
-	oldestStoryTime := time.Second * 1
-	items := make([]apimodel.GetItemResponse, 0, 100)
+
 	for idx := 0; idx < len(topStories); idx++ {
-		// Cache the stories.
+		// Caching logic:
 		// If a story is old enough, stop checking for it.
 		// -> If a story is old enough, add it to the cache.
 		// --> When a story is in the cache, we skip checking for it.
+		// Note: We don't cache stories that are younger than 2 days old and have less than the threshold.
 
 		// Skip stories that we've saved in the DAL.
 		if _, ok := dal[topStories[idx]]; ok {
@@ -96,43 +96,28 @@ func checkStories(scoreThreshold int, topStories []int) error {
 		if err != nil {
 			logrus.Fatalf("error getting item: %s", err)
 		}
-		items = append(items, item)
-		avgScore += item.Score
-		if item.Score > topScore {
-			topScore = item.Score
-		}
-		if item.Score < botScore {
-			botScore = item.Score
-		}
+
+		// If our story meets the threshold and isn't in the cache, then add it to the notif list and the cache.
 		if item.Score >= scoreThreshold {
 			numStoriesOverThreshold++
-		}
-		if t := time.Unix(item.Time, 0); time.Since(t) > oldestStoryTime {
-			oldestStoryTime = time.Since(t)
+			// If story is already in the cache, skip it.
+			if _, ok := dal[topStories[idx]]; ok {
+				continue
+			}
+			dal[item.ID] = struct{}{}
+			notifItems = append(notifItems, item)
 		}
 
-		// If the time since the story was posted is greater than 2 days,
-		// then add it to the cache.
-		if t := time.Unix(item.Time, 0); time.Since(t) >= time.Hour*24*2 {
+		// If our story does meet the treshold, but the time since the story was posted is greater than 2 days, add it to the cache anyway.
+		if t := time.Unix(item.Time, 0); time.Since(t) >= maxAge {
 			logrus.Debugf("story %d is older than two days: %v\n", item.ID, t)
 			dal[item.ID] = struct{}{}
-		} else {
+		} else { // If neither are true, then just don't do anything.
 			logrus.Debugf("story %d is NOT older than two days: %v\n", item.ID, t)
 		}
 	}
 
-	avgScore = avgScore / 100
-	logrus.Debugf("avg: %d\ntop: %d\nbot: %d\nnumOverThreshold: %d\nstories:\n\t1: %d\n\t10: %d\n\t100: %d\n",
-		avgScore,
-		topScore,
-		botScore,
-		numStoriesOverThreshold,
-		items[0].Score,
-		items[9].Score,
-		items[99].Score,
-	)
-
-	return nil
+	return notifItems, nil
 }
 
 func setupLogger() {
@@ -155,10 +140,32 @@ func main() {
 	}
 
 	// Find all items in the list that meet the threshold.
-	scoreThreshold := 100 // Arbitrary. Let the user set this.
+	scoreThreshold := 100        // TODO: Default. Let the user set this.
+	maxAge := time.Hour * 24 * 2 // TODO: Default. Let the user set this.
 
-	err = checkStories(scoreThreshold, topStories)
+	println("starting 1st run")
+	start := time.Now()
+	items, err := checkStories(scoreThreshold, maxAge, topStories)
+	fmt.Printf("it took %v to complete the run\n", time.Since(start))
+	println("end 1st run")
 	if err != nil {
 		logrus.Fatalf("error checking stories: %s", err)
+	}
+	for idx, item := range items {
+		fmt.Printf("[%d] You have mail! --- %s\n", idx, item.Title)
+	}
+
+	// Write a test that replicates this manual test.
+	// We expect not too see any results when this is run one after another.
+	println("starting 2nd run")
+	start = time.Now()
+	items, err = checkStories(scoreThreshold, maxAge, topStories)
+	fmt.Printf("it took %v to complete the run\n", time.Since(start))
+	println("end 2nd run")
+	if err != nil {
+		logrus.Fatalf("error checking stories: %s", err)
+	}
+	for idx, item := range items {
+		fmt.Printf("[%d] You have mail! --- %s\n", idx, item.Title)
 	}
 }
