@@ -25,12 +25,16 @@ const (
 )
 
 // dal is an in-memory database for caching stories.
-// The story ID is mapped to the story score.
-var dal map[int]struct{}
+// The story ID is mapped to the story.
+var dal map[int]cachedStory
+
+type cachedStory struct {
+	time int64
+}
 
 func initDAL() {
 	// Initialize the DAL.
-	dal = map[int]struct{}{}
+	dal = map[int]cachedStory{}
 }
 
 func getTopStories() ([]int, error) {
@@ -83,6 +87,10 @@ func checkStories(scoreThreshold int, maxAge time.Duration, topStories []int) ([
 		// --> When a story is in the cache, we skip checking for it.
 		// Note: We don't cache stories that are younger than 2 days old and have less than the threshold.
 
+		// Expiring items in the cache:
+		// We can safely assume that items older than 5 days will no longer exist in the top stories list,
+		// so delete the from the cache.
+
 		// Skip stories that we've saved in the DAL.
 		if _, ok := dal[topStories[idx]]; ok {
 			logrus.Debugf("we've seen item %d before!\n", topStories[idx])
@@ -104,14 +112,16 @@ func checkStories(scoreThreshold int, maxAge time.Duration, topStories []int) ([
 			if _, ok := dal[topStories[idx]]; ok {
 				continue
 			}
-			dal[item.ID] = struct{}{}
+			// Otherwise, add it to the cache and the list of items to notify the user of.
+			dal[item.ID] = cachedStory{time: item.Time}
 			notifItems = append(notifItems, item)
+			continue
 		}
 
 		// If our story does meet the treshold, but the time since the story was posted is greater than 2 days, add it to the cache anyway.
 		if t := time.Unix(item.Time, 0); time.Since(t) >= maxAge {
 			logrus.Debugf("story %d is older than two days: %v\n", item.ID, t)
-			dal[item.ID] = struct{}{}
+			dal[item.ID] = cachedStory{time: item.Time}
 		} else { // If neither are true, then just don't do anything.
 			logrus.Debugf("story %d is NOT older than two days: %v\n", item.ID, t)
 		}
@@ -124,7 +134,30 @@ func setupLogger() {
 	// TODO: Use config to configure logger.
 	logrus.SetFormatter(&logrus.JSONFormatter{})
 	logrus.SetOutput(os.Stderr)
-	logrus.SetLevel(logrus.InfoLevel)
+	logrus.SetLevel(logrus.DebugLevel)
+}
+
+// bgDeleteOldStories deletes stories older than the given maxAge at the interval specified by frequency.
+// TODO: Test this.
+func bgDeleteOldStories(maxAge, frequency time.Duration) {
+	for itemID, item := range dal {
+		// TODO: Create and use a domain model for the item where the time is a time.Time, not int64.
+		// If the story is 5 days or older, delete it from the cache to conserve space.
+		if t := time.Unix(item.time, 0); time.Since(t) >= maxAge {
+			logrus.WithFields(logrus.Fields{"item_id": itemID, "item_age": time.Since(t)}).Debug("Deleting old item from cache.")
+			delete(dal, itemID)
+		}
+	}
+	time.Sleep(frequency)
+}
+
+// notify lets the user know of the given stories...
+// TODO: email, rss, slack, push notif?
+func notify(items []apimodel.GetItemResponse) {
+	for idx, item := range items {
+		fmt.Printf("[%d] You have mail! --- %s\n", idx, item.Title)
+		// TODO: Add URL?
+	}
 }
 
 func main() {
@@ -142,30 +175,28 @@ func main() {
 	// Find all items in the list that meet the threshold.
 	scoreThreshold := 100        // TODO: Default. Let the user set this.
 	maxAge := time.Hour * 24 * 2 // TODO: Default. Let the user set this.
+	maxCacheAge := time.Hour * 24 * 5
+	cacheDeleteFrequency := time.Hour * 8
+	newStoryCheckFrequency := time.Second * 10
 
-	println("starting 1st run")
-	start := time.Now()
-	items, err := checkStories(scoreThreshold, maxAge, topStories)
-	fmt.Printf("it took %v to complete the run\n", time.Since(start))
-	println("end 1st run")
-	if err != nil {
-		logrus.Fatalf("error checking stories: %s", err)
-	}
-	for idx, item := range items {
-		fmt.Printf("[%d] You have mail! --- %s\n", idx, item.Title)
+	// Start deleting items in the background.
+	go bgDeleteOldStories(maxCacheAge, cacheDeleteFrequency)
+
+	// Start checking for stories.
+	for {
+		logrus.Debug("Checking for new stories...")
+		start := time.Now()
+		items, err := checkStories(scoreThreshold, maxAge, topStories)
+		logrus.Debugf("it took %v to complete the run\n", time.Since(start))
+		logrus.Debug("... Done checking for new stories.")
+		if err != nil {
+			logrus.Fatalf("error checking stories: %s", err)
+		}
+
+		notify(items)
+
+		time.Sleep(newStoryCheckFrequency)
 	}
 
-	// Write a test that replicates this manual test.
-	// We expect not too see any results when this is run one after another.
-	println("starting 2nd run")
-	start = time.Now()
-	items, err = checkStories(scoreThreshold, maxAge, topStories)
-	fmt.Printf("it took %v to complete the run\n", time.Since(start))
-	println("end 2nd run")
-	if err != nil {
-		logrus.Fatalf("error checking stories: %s", err)
-	}
-	for idx, item := range items {
-		fmt.Printf("[%d] You have mail! --- %s\n", idx, item.Title)
-	}
+	// TODO: Write a test that verifies the cache logic.
 }
